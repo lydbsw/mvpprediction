@@ -4,13 +4,11 @@
 """
 mvp_prediction.py
 
-Predict NBA MVP winners (1980–2024) without PER, with expanded output:
-  • Inputs: NBA_Dataset.csv, mvp_history.csv,
-            historical_RAPTOR_by_player.csv,
-            modern_RAPTOR_by_player.csv
-  • Models: Logistic Regression, Random Forest, XGBoost
-  • Extra output: per‐model predicted MVP list, true vs. pred table,
-                  confusion matrix, SHAP interpretability
+Predict NBA MVP winners (1980–2024) without PER, with expanded reporting:
+  • For each model: classification report, ROC AUC, confusion matrix
+  • List of all model‐predicted MVPs
+  • For each real MVP season: actual MVP + model’s single top‐probability pick (p=…)
+  • SHAP interpretability for Logistic Regression
 """
 
 import pandas as pd
@@ -32,29 +30,16 @@ from sklearn.metrics import (
 
 
 def load_data():
-    """ Load MVP labels, base stats, and RAPTOR data from your CSVs. """
-    # — MVP labels —
-    mvp = pd.read_csv(
-        "data/mvp_history.csv",
-        skiprows=1,
-        usecols=["Season", "Player"]
-    )
-    # Convert “1980-81”→1981, “2023-24”→2024
-    mvp["season"] = (
-        mvp["Season"]
-        .str.split("-", expand=True)[0]
-        .astype(int) + 1
-    )
+    mvp = pd.read_csv("data/mvp_history.csv", skiprows=1, usecols=["Season", "Player"])
+    mvp["season"] = mvp["Season"].str.split("-", expand=True)[0].astype(int) + 1
     mvp = (
         mvp.rename(columns={"Player": "player"})
            .loc[:, ["season", "player"]]
            .assign(MVP=1)
     )
 
-    # — Season‐level box & advanced stats —
     bb = pd.read_csv("data/NBA_Dataset.csv")
 
-    # — RAPTOR data (historical + modern) —
     rap_h = pd.read_csv("data/historical_RAPTOR_by_player.csv")
     rap_m = pd.read_csv("data/modern_RAPTOR_by_player.csv")
     rap_cols = ["player_name", "season", "raptor_offense", "raptor_defense", "raptor_total"]
@@ -68,21 +53,17 @@ def load_data():
 
 
 def preprocess_and_merge(mvp, bb, rap):
-    """ Merge stats + RAPTOR + MVP labels, fill numeric gaps with medians. """
     df = (
-        bb
-        .merge(rap, on=["season", "player"], how="left")
-        .merge(mvp, on=["season", "player"], how="left")
+        bb.merge(rap, on=["season", "player"], how="left")
+          .merge(mvp, on=["season", "player"], how="left")
     )
     df["MVP"] = df["MVP"].fillna(0).astype(int)
-
     num_cols = df.select_dtypes(include=[np.number]).columns
     df[num_cols] = df[num_cols].fillna(df[num_cols].median())
     return df
 
 
 def feature_engineering(df):
-    """ Define feature columns and separate X, y. """
     feats = [
         'ws', 'bpm', 'vorp', 'win_loss_pct',
         'pts_per_g', 'trb_per_g', 'ast_per_g',
@@ -92,10 +73,9 @@ def feature_engineering(df):
 
 
 def train_models(X_train, y_train):
-    """ Train LogisticRegression, RandomForest, and XGBoost. """
     models = {}
 
-    # 1) Logistic Regression (with scaling)
+    # Logistic Regression
     pipe = Pipeline([
         ("scaler", StandardScaler()),
         ("lr", LogisticRegression(max_iter=2000, random_state=42))
@@ -103,17 +83,14 @@ def train_models(X_train, y_train):
     pipe.fit(X_train, y_train)
     models["LogisticRegression"] = pipe
 
-    # 2) Random Forest
+    # Random Forest
     rf = RandomForestClassifier(
-        n_estimators=300,
-        max_depth=8,
-        random_state=42,
-        n_jobs=-1
+        n_estimators=300, max_depth=8, random_state=42, n_jobs=-1
     )
     rf.fit(X_train, y_train)
     models["RandomForest"] = rf
 
-    # 3) XGBoost
+    # XGBoost
     xg = xgb.XGBClassifier(
         n_estimators=300,
         learning_rate=0.05,
@@ -129,12 +106,7 @@ def train_models(X_train, y_train):
 
 
 def evaluate_and_report(models, df_test, X_test, y_test):
-    """
-    For each model:
-      • Print classification report & ROC AUC & confusion matrix
-      • List (season, player) predicted as MVP with probabilities
-    Also show a side‑by‑side true vs. predicted table.
-    """
+    # 1) Print metrics + list of predicted MVPs per model
     for name, model in models.items():
         y_pred = model.predict(X_test)
         y_prob = model.predict_proba(X_test)[:, 1]
@@ -145,7 +117,6 @@ def evaluate_and_report(models, df_test, X_test, y_test):
         print(f"ROC AUC: {roc_auc_score(y_test, y_prob):.3f}")
         print(f"Confusion Matrix: TN={tn}, FP={fp}, FN={fn}, TP={tp}")
 
-        # attach predictions back to df_test
         df_test[f"{name}_pred"] = y_pred
         df_test[f"{name}_prob"] = y_prob
 
@@ -153,54 +124,55 @@ def evaluate_and_report(models, df_test, X_test, y_test):
         print(f"\n{name} predicted MVPs ({len(preds)}):")
         print(preds.to_string(index=False))
 
-    # Show combined true vs. pred
-    print("\n--- True vs. Predicted (first 10 rows) ---")
-    cols = ["season", "player", "MVP"]
-    for name in models:
-        cols += [f"{name}_pred", f"{name}_prob"]
-    print(df_test[cols].head(10).to_string(index=False))
+    # 2) No “True vs. Predicted” block
+
+    # 3) For each real MVP season, show actual MVP + model’s top‑probability pick:
+    actual_mvps = df_test[df_test["MVP"] == 1]
+    print("\n--- Predictions on Actual MVP Seasons ---")
+    for _, row in actual_mvps.iterrows():
+        season = row["season"]
+        actual = row["player"]
+        print(f"\nSeason {season} — Actual MVP: {actual}")
+
+        # All test rows for that season
+        season_df = df_test[df_test["season"] == season]
+
+        for name in models:
+            # pick the row with max probability
+            top = season_df.loc[season_df[f"{name}_prob"].idxmax()]
+            pick_player = top["player"]
+            pick_prob   = top[f"{name}_prob"]
+            print(f"  • {name} predicted: {pick_player} (p={pick_prob:.3f})")
 
 
 def shap_summary(model_pipeline, X_ref, out="shap_summary.png"):
-    """
-    Extract the scaler and estimator from the LogisticRegression pipeline,
-    then run Tree‐ or Kernel‐based SHAP on the scaled data.
-    (Here we use shap.Explainer + Independent masker.)
-    """
-    # 1) get steps
     scaler = model_pipeline.named_steps["scaler"]
     estimator = model_pipeline.named_steps["lr"]
-
-    # 2) scale your reference dataset
     X_scaled = scaler.transform(X_ref)
 
-    # 3) build a SHAP Explainer on the bare estimator
     explainer = shap.Explainer(
-        estimator.predict, 
+        estimator.predict,
         masker=shap.maskers.Independent(X_scaled)
     )
     shap_vals = explainer(X_scaled)
 
-    # 4) summary plot
     shap.summary_plot(
-        shap_vals, X_scaled,
+        shap_vals,
+        X_scaled,
         feature_names=X_ref.columns,
         show=False
     )
     plt.tight_layout()
     plt.savefig(out)
-    print(f"SHAP summary plot saved to {out}")
+    print(f"\nSHAP summary plot saved to {out}")
 
 
 def main():
-    # 1) Load & merge
     mvp, bb, rap = load_data()
     df = preprocess_and_merge(mvp, bb, rap)
 
-    # 2) Feature/target split
     X, y = feature_engineering(df)
 
-    # 3) Train/test split (preserve indices for reporting)
     idx = df.index.to_numpy()
     X_tr, X_te, y_tr, y_te, idx_tr, idx_te = train_test_split(
         X, y, idx,
@@ -209,16 +181,10 @@ def main():
         random_state=42
     )
 
-    # Build a test‐set DataFrame for human‐readable output
     df_test = df.loc[idx_te, ["season", "player", "MVP"]].reset_index(drop=True)
 
-    # 4) Train models
     models = train_models(X_tr, y_tr)
-
-    # 5) Evaluate & detailed report
     evaluate_and_report(models, df_test, X_te, y_te)
-
-    # 6) SHAP interpretation on LogisticRegression
     shap_summary(models["LogisticRegression"], X_tr)
 
 
