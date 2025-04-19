@@ -1,1 +1,56 @@
 
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+import shap
+
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+from sklearn.pipeline import Pipeline
+from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier
+import xgboost as xgb
+from sklearn.metrics import (
+    classification_report,
+    roc_auc_score,
+    confusion_matrix,
+    roc_curve
+)
+
+# === Load MVP historical data ===
+mvp = pd.read_csv("mvp_history.csv", skiprows=1, usecols=["Season", "Player"])
+
+# Extract numerical season year and format player column
+mvp["season"] = mvp["Season"].str.split("-", expand=True)[0].astype(int) + 1
+mvp = mvp.rename(columns={"Player": "player"})[["season", "player"]].assign(MVP=1)
+
+# === Visualization: MVP award count by season ===
+plt.figure(figsize=(12, 5))
+sns.countplot(data=mvp, x='season', order=sorted(mvp['season'].unique()))
+plt.xticks(rotation=45)
+plt.title('Number of MVP Awards by Season')
+plt.xlabel('Season')
+plt.ylabel('MVP Count')
+plt.tight_layout()
+plt.show()
+
+# === Load additional datasets ===
+bb = pd.read_csv("NBA_Dataset.csv")
+rap_h = pd.read_csv("historical_RAPTOR_by_player.csv")
+rap_m = pd.read_csv("modern_RAPTOR_by_player.csv")
+
+# Select relevant columns from RAPTOR data
+rap_cols = ["player_name", "season", "raptor_offense", "raptor_defense", "raptor_total"]
+rap = pd.concat([rap_h[rap_cols], rap_m[rap_cols]], ignore_index=True)
+
+# Clean and rename for merging
+rap = rap.drop_duplicates(subset=["player_name", "season"]).rename(columns={"player_name": "player"})
+
+# === Merge all datasets into one ===
+df = bb.merge(rap, on=["season", "player"], how="left").merge(mvp, on=["season", "player"], how="left")
+
+# Fill NaNs in MVP column and numeric columns
+df["MVP"] = df["MVP"].fillna(0).astype(int)
+num_cols = df.select_dtypes(include=[np.number]).columns
+df[num_cols] = df[num_cols].fillna(df[num_cols].median())
